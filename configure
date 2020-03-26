@@ -862,7 +862,7 @@ echo uname = $uname >> configure.log
 # udpate Makefile with the configure results
 sed < ${SRCDIR}Makefile.in "
 /^CC *=/s#=.*#=$CC#
-/^CFLAGS *=/s#=.*#=$CFLAGS#
+/^CFLAGS *=/s#=.*#=$CFLAGS -pthread#
 /^SFLAGS *=/s#=.*#=$SFLAGS#
 /^LDFLAGS *=/s#=.*#=$LDFLAGS#
 /^LDSHARED *=/s#=.*#=$LDSHARED#

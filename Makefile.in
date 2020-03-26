@@ -58,11 +58,11 @@ ZINC=
 ZINCOUT=-I.
 
 OBJZ = adler32.o crc32.o deflate.o infback.o inffast.o inflate.o inftrees.o trees.o zutil.o
-OBJG = compress.o uncompr.o gzclose.o gzlib.o gzread.o gzwrite.o
+OBJG = compress.o uncompr.o gzclose.o gzlib.o gzread.o gzwrite.o pinflate.o
 OBJC = $(OBJZ) $(OBJG)
 
 PIC_OBJZ = adler32.lo crc32.lo deflate.lo infback.lo inffast.lo inflate.lo inftrees.lo trees.lo zutil.lo
-PIC_OBJG = compress.lo uncompr.lo gzclose.lo gzlib.lo gzread.lo gzwrite.lo
+PIC_OBJG = compress.lo uncompr.lo gzclose.lo gzlib.lo gzread.lo gzwrite.lo pinflate.lo
 PIC_OBJC = $(PIC_OBJZ) $(PIC_OBJG)
 
 # to use the asm code: make OBJA=match.o, PIC_OBJA=match.lo
@@ -201,6 +201,9 @@ gzread.o: $(SRCDIR)gzread.c
 gzwrite.o: $(SRCDIR)gzwrite.c
 	$(CC) $(CFLAGS) $(ZINC) -c -o $@ $(SRCDIR)gzwrite.c
 
+pinflate.o: $(SRCDIR)pinflate.c
+	$(CC) $(CFLAGS) $(ZINC) -c -o $@ $(SRCDIR)pinflate.c
+
 
 adler32.lo: $(SRCDIR)adler32.c
 	-@mkdir objs 2>/dev/null || test -d objs
@@ -276,6 +279,11 @@ gzwrite.lo: $(SRCDIR)gzwrite.c
 	-@mkdir objs 2>/dev/null || test -d objs
 	$(CC) $(SFLAGS) $(ZINC) -DPIC -c -o objs/gzwrite.o $(SRCDIR)gzwrite.c
 	-@mv objs/gzwrite.o $@
+
+pinflate.lo: $(SRCDIR)pinflate.c
+	-@mkdir objs 2>/dev/null || test -d objs
+	$(CC) $(SFLAGS) $(ZINC) -DPIC -c -o objs/pinflate.o $(SRCDIR)pinflate.c
+	-@mv objs/pinflate.o $@
 
 
 placebo $(SHAREDLIBV): $(PIC_OBJS) libz.a
@@ -398,6 +406,8 @@ infback.o inflate.o: $(SRCDIR)zutil.h $(SRCDIR)zlib.h zconf.h $(SRCDIR)inftrees.
 inffast.o: $(SRCDIR)zutil.h $(SRCDIR)zlib.h zconf.h $(SRCDIR)inftrees.h $(SRCDIR)inflate.h $(SRCDIR)inffast.h
 inftrees.o: $(SRCDIR)zutil.h $(SRCDIR)zlib.h zconf.h $(SRCDIR)inftrees.h
 trees.o: $(SRCDIR)deflate.h $(SRCDIR)zutil.h $(SRCDIR)zlib.h zconf.h $(SRCDIR)trees.h
+pinflate.o: $(SRCDIR)pinflate.h $(SRCDIR)gzguts.h
+gzread.o inflate.o inffast.o pinflate.o gzlib.o: $(SRCDIR)pinflate.h
 
 adler32.lo zutil.lo: $(SRCDIR)zutil.h $(SRCDIR)zlib.h zconf.h
 gzclose.lo gzlib.lo gzread.lo gzwrite.lo: $(SRCDIR)zlib.h zconf.h $(SRCDIR)gzguts.h
@@ -408,3 +418,5 @@ infback.lo inflate.lo: $(SRCDIR)zutil.h $(SRCDIR)zlib.h zconf.h $(SRCDIR)inftree
 inffast.lo: $(SRCDIR)zutil.h $(SRCDIR)zlib.h zconf.h $(SRCDIR)inftrees.h $(SRCDIR)inflate.h $(SRCDIR)inffast.h
 inftrees.lo: $(SRCDIR)zutil.h $(SRCDIR)zlib.h zconf.h $(SRCDIR)inftrees.h
 trees.lo: $(SRCDIR)deflate.h $(SRCDIR)zutil.h $(SRCDIR)zlib.h zconf.h $(SRCDIR)trees.h
+pinflate.lo: $(SRCDIR)pinflate.h $(SRCDIR)gzguts.h
+gzread.lo inflate.lo inffast.lo pinflate.lo gzlib.lo: $(SRCDIR)pinflate.h

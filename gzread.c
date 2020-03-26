@@ -4,10 +4,11 @@
  */
 
 #include "gzguts.h"
+#include "pinflate.h"
 
 /* Local functions */
 local int gz_load OF((gz_statep, unsigned char *, unsigned, unsigned *));
-local int gz_avail OF((gz_statep));
+int gz_avail OF((gz_statep));
 local int gz_look OF((gz_statep));
 local int gz_decomp OF((gz_statep));
 local int gz_fetch OF((gz_statep));
@@ -53,7 +54,7 @@ local int gz_load(state, buf, len, have)
    If strm->avail_in != 0, then the current data is moved to the beginning of
    the input buffer, and then the remainder of the buffer is loaded with the
    available data from the input file. */
-local int gz_avail(state)
+int gz_avail(state)
     gz_statep state;
 {
     unsigned got;
@@ -95,6 +96,9 @@ local int gz_look(state)
 
     /* allocate read buffers and inflate memory */
     if (state->size == 0) {
+        struct gz_pinflate* pi = pie_init(state);
+
+      if(!pi){
         /* allocate buffers */
         state->in = (unsigned char *)malloc(state->want);
         state->out = (unsigned char *)malloc(state->want << 1);
@@ -105,6 +109,12 @@ local int gz_look(state)
             return -1;
         }
         state->size = state->want;
+        state->strm.pi = NULL;
+      }else{
+        state->in  = pi->in_buffer[0];
+        state->out = NULL;
+        state->size = state->want;
+      }
 
         /* allocate inflate memory */
         state->strm.zalloc = Z_NULL;
@@ -119,6 +129,8 @@ local int gz_look(state)
             gz_error(state, Z_MEM_ERROR, "out of memory");
             return -1;
         }
+        // note inflateInit2 would reset strm.pi to NULL
+	state->strm.pi = pi;
     }
 
     /* get at least the magic bytes in the input buffer */
@@ -141,6 +153,10 @@ local int gz_look(state)
         inflateReset(strm);
         state->how = GZIP;
         state->direct = 0;
+	if(state->strm.pi){
+            state->strm.pi->rewind = 0;
+            sem_post(&state->strm.pi->gz_sem);
+	}
         return 0;
     }
 
@@ -157,6 +173,9 @@ local int gz_look(state)
        the output buffer is larger than the input buffer, which also assures
        space for gzungetc() */
     state->x.next = state->out;
+    if(strm->pi){
+        state->x.next = strm->pi->curr_buff;
+    }
     if (strm->avail_in) {
         memcpy(state->x.next, strm->next_in, strm->avail_in);
         state->x.have = strm->avail_in;
@@ -178,6 +197,9 @@ local int gz_decomp(state)
     int ret = Z_OK;
     unsigned had;
     z_streamp strm = &(state->strm);
+
+    if(strm->pi)
+        return gz_decomp_mt(state);
 
     /* fill output buffer up to end of deflate stream */
     had = strm->avail_out;
@@ -240,10 +262,10 @@ local int gz_fetch(state)
                 return 0;
             break;
         case COPY:      /* -> COPY */
-            if (gz_load(state, state->out, state->size << 1, &(state->x.have))
+            if (gz_load(state, strm->pi?strm->pi->curr_buff:state->out, state->size << 1, &(state->x.have))
                     == -1)
                 return -1;
-            state->x.next = state->out;
+            state->x.next = strm->pi?strm->pi->curr_buff:state->out;
             return 0;
         case GZIP:      /* -> GZIP or LOOK (if end of gzip stream) */
             strm->avail_out = state->size << 1;
@@ -251,7 +273,7 @@ local int gz_fetch(state)
             if (gz_decomp(state) == -1)
                 return -1;
         }
-    } while (state->x.have == 0 && (!state->eof || strm->avail_in));
+    } while (state->x.have == 0 && (strm->pi?(!strm->pi->eof||strm->pi->prev_buff_returned):(!state->eof || strm->avail_in)));
     return 0;
 }
 
@@ -325,6 +347,17 @@ local z_size_t gz_read(state, buf, len)
             memcpy(buf, state->x.next, n);
             state->x.next += n;
             state->x.have -= n;
+        }
+
+        else if(state->strm.pi) { // zlib-pie, see pinflate.h.
+            if (state->strm.pi->eof || state->how == COPY && state->eof) {
+                state->past = 1;
+                break;
+            } else {
+                if (gz_fetch(state) == -1)
+                    return 0;
+                continue;
+            }
         }
 
         /* output buffer empty -- return if we're at the end of the input */
@@ -638,6 +671,8 @@ int ZEXPORT gzclose_r(file)
     /* check that we're reading */
     if (state->mode != GZ_READ)
         return Z_STREAM_ERROR;
+
+    pie_close(state); // zlib-pie, see pinflate.h
 
     /* free memory and close file */
     if (state->size) {

@@ -7,6 +7,7 @@
 #include "inftrees.h"
 #include "inflate.h"
 #include "inffast.h"
+#include "pinflate.h"
 
 #ifdef ASMINF
 #  pragma message("Assembler code may have bugs -- use at your own risk")
@@ -51,6 +52,7 @@ void ZLIB_INTERNAL inflate_fast(strm, start)
 z_streamp strm;
 unsigned start;         /* inflate()'s starting value for strm->avail_out */
 {
+    struct gz_pinflate* pi = strm->pi;
     struct inflate_state FAR *state;
     z_const unsigned char FAR *in;      /* local strm->next_in */
     z_const unsigned char FAR *last;    /* have enough input while in < last */
@@ -117,6 +119,14 @@ unsigned start;         /* inflate()'s starting value for strm->avail_out */
             Tracevv((stderr, here.val >= 0x20 && here.val < 0x7f ?
                     "inflate:         literal '%c'\n" :
                     "inflate:         literal 0x%02x\n", here.val));
+          if(pi){
+            if((pi->decoded_len+=1) > PIE_SCROLL_BUFFER_THRESHOLD){
+               *pi->next_leng_wpos++ = PIE_TOKEN_SCROLL_BUFFER;
+                pi->decoded_len = 1;
+            }
+            *pi->next_leng_wpos++ = 0;
+            *pi->next_lite_wpos++ = (unsigned char) here.val;
+          }else
             *out++ = (unsigned char)(here.val);
         }
         else if (op & 16) {                     /* length base */
@@ -166,6 +176,24 @@ unsigned start;         /* inflate()'s starting value for strm->avail_out */
                 hold >>= op;
                 bits -= op;
                 Tracevv((stderr, "inflate:         distance %u\n", dist));
+              if(pi){
+                if((pi->decoded_len+=len) > PIE_SCROLL_BUFFER_THRESHOLD){
+                   *pi->next_leng_wpos++ = PIE_TOKEN_SCROLL_BUFFER;
+                    pi->decoded_len = len;
+                }
+                if(len<128 && dist>=len){
+                   *pi->next_leng_wpos++ = len;
+                }else{
+                    if(len<128){
+                       *pi->next_leng_wpos++ = -1;
+                       *pi->next_lite_wpos++ = len;
+                    }else{
+                       *pi->next_leng_wpos++ = -2;
+                       *pi->next_lite_wpos++ = len-128;
+                    }
+                }
+               *pi->next_dist_wpos++ = (unsigned short) dist;
+              }else{
                 op = (unsigned)(out - beg);     /* max distance in output */
                 if (dist > op) {                /* see if copy from window */
                     op = dist - op;             /* distance back in window */
@@ -262,6 +290,7 @@ unsigned start;         /* inflate()'s starting value for strm->avail_out */
                             *out++ = *from++;
                     }
                 }
+              } // if(pi)
             }
             else if ((op & 64) == 0) {          /* 2nd level distance code */
                 here = dcode[here.val + (hold & ((1U << op) - 1))];
@@ -287,7 +316,7 @@ unsigned start;         /* inflate()'s starting value for strm->avail_out */
             state->mode = BAD;
             break;
         }
-    } while (in < last && out < end);
+    } while (in < last && (pi || out < end));
 
     /* return unused bytes (on entry, bits < 8, so in won't go too far back) */
     len = bits >> 3;
@@ -297,8 +326,10 @@ unsigned start;         /* inflate()'s starting value for strm->avail_out */
 
     /* update state and return */
     strm->next_in = in;
+  if(!pi)
     strm->next_out = out;
     strm->avail_in = (unsigned)(in < last ? 5 + (last - in) : 5 - (in - last));
+  if(!pi)
     strm->avail_out = (unsigned)(out < end ?
                                  257 + (end - out) : 257 - (out - end));
     state->hold = hold;

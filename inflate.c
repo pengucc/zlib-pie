@@ -80,10 +80,12 @@
  * The history for versions after 1.2.0 are in ChangeLog in zlib distribution.
  */
 
+#include <stdio.h>
 #include "zutil.h"
 #include "inftrees.h"
 #include "inflate.h"
 #include "inffast.h"
+#include "pinflate.h"
 
 #ifdef MAKEFIXED
 #  ifndef BUILDFIXED
@@ -205,6 +207,7 @@ int stream_size;
         stream_size != (int)(sizeof(z_stream)))
         return Z_VERSION_ERROR;
     if (strm == Z_NULL) return Z_STREAM_ERROR;
+    strm->pi  = Z_NULL;
     strm->msg = Z_NULL;                 /* in case we return an error */
     if (strm->zalloc == (alloc_func)0) {
 #ifdef Z_SOLO
@@ -475,8 +478,10 @@ unsigned copy;
 /* Load registers with state in inflate() for speed */
 #define LOAD() \
     do { \
-        put = strm->next_out; \
-        left = strm->avail_out; \
+        if(!pi){ \
+            put = strm->next_out; \
+            left = strm->avail_out; \
+        } \
         next = strm->next_in; \
         have = strm->avail_in; \
         hold = state->hold; \
@@ -486,8 +491,10 @@ unsigned copy;
 /* Restore state from registers in inflate() */
 #define RESTORE() \
     do { \
-        strm->next_out = put; \
-        strm->avail_out = left; \
+        if(!pi){ \
+            strm->next_out = put; \
+            strm->avail_out = left; \
+        } \
         strm->next_in = next; \
         strm->avail_in = have; \
         state->hold = hold; \
@@ -619,6 +626,7 @@ unsigned copy;
    will return Z_BUF_ERROR if it has not reached the end of the stream.
  */
 
+
 int ZEXPORT inflate(strm, flush)
 z_streamp strm;
 int flush;
@@ -642,7 +650,9 @@ int flush;
     static const unsigned short order[19] = /* permutation of code lengths */
         {16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15};
 
-    if (inflateStateCheck(strm) || strm->next_out == Z_NULL ||
+    struct gz_pinflate* pi = strm->pi;
+
+    if (inflateStateCheck(strm) || (strm->next_out == Z_NULL && !pi) ||
         (strm->next_in == Z_NULL && strm->avail_in != 0))
         return Z_STREAM_ERROR;
 
@@ -902,7 +912,34 @@ int flush;
             state->mode = COPY;
         case COPY:
             copy = state->length;
-            if (copy) {
+            if (copy && pi) {
+                static long total = 0;
+                static long cpcnt = 0;
+                static long xcrcpy= 0;
+                cpcnt++;
+                total += copy;
+                if(copy > have) xcrcpy++;
+                if (copy > have) copy = have;
+                if (copy == 0) goto inf_leave;
+
+                if((pi->decoded_len+=copy) > PIE_SCROLL_BUFFER_THRESHOLD){
+                   *pi->next_leng_wpos++ = PIE_TOKEN_SCROLL_BUFFER;
+                    pi->decoded_len = copy;
+                }
+
+
+               *pi->next_leng_wpos    = PIE_TOKEN_COPY_BLOCK;
+                pi->next_leng_wpos   += sizeof(void*); // so that #len always >= #lit
+               *pi->next_dist_wpos++ = copy; // #bytes to copy
+                for(int i=0; i<sizeof(void*); ++i){
+                   *pi->next_lite_wpos++ = (unsigned char)(0x0FF&(((unsigned long)next)>>(i*8)));
+                }
+                pi->has_copy_blocks++;
+                have -= copy;
+                next += copy;
+                state->length -= copy;
+                break;
+            } else if (copy) {
                 if (copy > have) copy = have;
                 if (copy > left) copy = left;
                 if (copy == 0) goto inf_leave;
@@ -1042,7 +1079,7 @@ int flush;
         case LEN_:
             state->mode = LEN;
         case LEN:
-            if (have >= 6 && left >= 258) {
+            if (have >= 6 && (pi || left >= 258)) {
                 RESTORE();
                 inflate_fast(strm, out);
                 LOAD();
@@ -1075,6 +1112,15 @@ int flush;
                         "inflate:         literal '%c'\n" :
                         "inflate:         literal 0x%02x\n", here.val));
                 state->mode = LIT;
+                if(pi){
+                    if((pi->decoded_len+=1) > PIE_SCROLL_BUFFER_THRESHOLD){
+                      *pi->next_leng_wpos++ = PIE_TOKEN_SCROLL_BUFFER;
+                       pi->decoded_len = 1;
+                    }
+                   *pi->next_leng_wpos++ = 0;
+                   *pi->next_lite_wpos++ = (unsigned char) here.val;
+                    state->mode = LEN;
+                }
                 break;
             }
             if (here.op & 32) {
@@ -1144,6 +1190,29 @@ int flush;
             Tracevv((stderr, "inflate:         distance %u\n", state->offset));
             state->mode = MATCH;
         case MATCH:
+            if(pi){
+                int len  = state->length;
+                int dist = state->offset;
+                if((pi->decoded_len+=len) > PIE_SCROLL_BUFFER_THRESHOLD){
+                  *pi->next_leng_wpos++ = PIE_TOKEN_SCROLL_BUFFER;
+                   pi->decoded_len = len;
+                }
+                if(len<128 && dist>=len){
+                   *pi->next_leng_wpos++ = len;
+                }else{
+                    if(len<128){
+                       *pi->next_leng_wpos++ = -1;
+                       *pi->next_lite_wpos++ = len;
+                    }else{
+                       *pi->next_leng_wpos++ = -2;
+                       *pi->next_lite_wpos++ = len-128;
+                    }
+                }
+               *pi->next_dist_wpos++ = (unsigned short) dist;
+                state->length = 0;
+                state->mode = LEN;
+                break;
+            }
             if (left == 0) goto inf_leave;
             copy = out - left;
             if (state->offset > copy) {         /* copy from window */
@@ -1191,6 +1260,7 @@ int flush;
         case LIT:
             if (left == 0) goto inf_leave;
             *put++ = (unsigned char)(state->length);
+            // inflate_write: DONE in LEN
             left--;
             state->mode = LEN;
             break;
@@ -1200,6 +1270,7 @@ int flush;
                 out -= left;
                 strm->total_out += out;
                 state->total += out;
+              if(!pi){
                 if ((state->wrap & 4) && out)
                     strm->adler = state->check =
                         UPDATE(state->check, put - out, out);
@@ -1213,6 +1284,10 @@ int flush;
                     state->mode = BAD;
                     break;
                 }
+              }else{
+                out = left;
+                pi->check = (unsigned int) hold;
+              }
                 INITBITS();
                 Tracev((stderr, "inflate:   check matches trailer\n"));
             }
@@ -1221,11 +1296,15 @@ int flush;
         case LENGTH:
             if (state->wrap && state->flags) {
                 NEEDBITS(32);
+              if(!pi){
                 if (hold != (state->total & 0xffffffffUL)) {
                     strm->msg = (char *)"incorrect length check";
                     state->mode = BAD;
                     break;
                 }
+              }else{
+                pi->length = (unsigned int) hold;
+              }
                 INITBITS();
                 Tracev((stderr, "inflate:   length matches trailer\n"));
             }
@@ -1252,6 +1331,9 @@ int flush;
      */
   inf_leave:
     RESTORE();
+    if(pi){
+        return ret;
+    }
     if (state->wsize || (out != strm->avail_out && state->mode < BAD &&
             (state->mode < CHECK || flush != Z_FINISH)))
         if (updatewindow(strm, strm->next_out, out - strm->avail_out)) {

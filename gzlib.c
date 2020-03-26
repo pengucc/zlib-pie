@@ -4,6 +4,7 @@
  */
 
 #include "gzguts.h"
+#include "pinflate.h"
 
 #if defined(_WIN32) && !defined(__BORLANDC__) && !defined(__MINGW32__)
 #  define LSEEK _lseeki64
@@ -356,10 +357,43 @@ int ZEXPORT gzrewind(file)
         return -1;
 
     /* back up and start over */
+  if(!state->strm.pi){
     if (LSEEK(state->fd, state->start, SEEK_SET) == -1)
         return -1;
     gz_reset(state);
     return 0;
+  }else{
+    struct gz_pinflate* pi = state->strm.pi;
+    int rewind = 0;
+    pthread_mutex_lock(&pi->raw_input_lock);
+    if (LSEEK(state->fd, state->start, SEEK_SET) == -1){
+        pthread_mutex_unlock(&pi->raw_input_lock);
+        return -1;
+    }
+    rewind = pi->rewind;
+    if( pi->rewind!= 2)
+        pi->rewind = 1;
+    pthread_mutex_unlock(&pi->raw_input_lock);
+    if(rewind!=2){
+        // discard contents till the buffer marked PIE_REWIND
+        pie_next_rbuf(pi);
+        while(*pi->next_leng_rpos != PIE_TOKEN_REWIND)
+            pie_next_rbuf(pi);
+        fprintf(stderr, "Find PIE_REWIND at buffer %d.\n", pi->rbuf_rotate);
+        if(pi->rewind!=2){
+            fprintf(stderr, "The impossible happend during rewind.\n");
+            abort();
+        }
+    }
+   *pi->next_leng_rpos = PIE_TOKEN_ROTATE_BUFFER;
+    pi->prev_buff_returned = NULL;
+    pi->prev_buff_end      = NULL;
+    pi->crc32              = 0;
+    pi->eof = 0;
+    pi->assemble_done      = 0;
+    gz_reset(state);
+    return 0;
+  }
 }
 
 /* -- see zlib.h -- */

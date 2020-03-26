@@ -77,6 +77,7 @@ typedef enum {
         CHECK -> LENGTH -> DONE
  */
 
+
 /* State maintained between inflate() calls -- approximately 7K bytes, not
    including the allocated sliding window, which is up to 32K bytes. */
 struct inflate_state {
